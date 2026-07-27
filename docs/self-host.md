@@ -393,6 +393,7 @@ Cela configure (via **pg_cron** Supabase) les jobs automatiques :
 | **bouncer_batch** | 07h + 13h UTC | Batch Bouncer des emails en attente |
 | **bounce_learning** | 04h UTC | Met à jour patterns bounce empiriques |
 | **credit_alerts** | 06h UTC | Alerte si crédits FullEnrich < 20% |
+| **credits_watchdog** | Toutes les 10 min | Met le pipeline en pause à court de crédits et le relance quand ils reviennent |
 | **recap_weekly** | Lundi 08h UTC | Email récap hebdo (via Resend) |
 | **cleanup_retention** | Quotidien 02h UTC | Supprime prospects archivés > 60 jours |
 
@@ -412,6 +413,45 @@ supabase functions invoke bouncer-batch --project-ref <ref> \
 ```
 
 > **Note :** `setup:crons` et son alternative manuelle ne sont qu'un commodity. Le funnel **marche sans** — sourcing + enrichissement + validation se font à la demande via l'UI.
+
+### Pause / reprise automatique sur épuisement de crédits
+
+Quand un provider payant tombe à court (FullEnrich renvoie `402`, Apify atteint son quota), le pipeline **se met en pause au lieu d'échouer** :
+
+- le job d'enrichissement passe au statut `paused`, ses entreprises restantes gardent le statut `pending` — **rien n'est perdu, aucune sélection à refaire** ;
+- les sources de scraping concernées sont sautées (log `prospect_scraping_logs.status = 'paused'`) au lieu de brûler des runs en erreur ;
+- l'état est mémorisé dans la table `provider_credit_state`.
+
+La reprise est assurée par l'edge function **`credits-watchdog`**, qui relit le solde des providers et redémarre les jobs en pause (leurs workers repartent là où ils s'étaient arrêtés). Trois déclencheurs :
+
+1. le cron `jr-credits-watchdog` (toutes les 10 min) — installé par `pnpm run setup:crons`, c'est le chemin recommandé ;
+2. l'UI, tant qu'un onglet suit un job en pause (re-vérification automatique toutes les 90 s, plus un bouton **« Vérifier le solde »** dans la modale d'enrichissement) ;
+3. manuellement :
+
+```bash
+supabase functions invoke credits-watchdog --project-ref <ref> \
+  -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY"
+```
+
+Alternative sans `setup:crons`, via le wrapper SQL fourni par la migration (lit `CRON_SECRET` dans le Vault) :
+
+```sql
+SELECT cron.schedule(
+  'credits-watchdog',
+  '*/10 * * * *',
+  $$SELECT public.call_credits_watchdog('https://<ref>.supabase.co/functions/v1')$$
+);
+```
+
+**Seuils configurables** (secrets edge functions, tous optionnels) :
+
+| Variable | Défaut | Rôle |
+|---|---|---|
+| `FULLENRICH_MIN_CREDITS` | `5` | Solde FullEnrich sous lequel on met en pause |
+| `APIFY_MIN_USD` | `0.5` | Budget Apify restant (USD) sous lequel on met en pause |
+| `CREDITS_RESUME_MARGIN` | `10` | Marge au-dessus du seuil exigée pour reprendre (évite le battement pause/reprise) |
+| `CREDITS_BLIND_RETRY_MINUTES` | `60` | Délai avant nouvelle tentative pour un provider dont le solde est illisible |
+| `ALERT_RECIPIENTS` | — | Destinataires des emails de mise en pause / reprise |
 
 ---
 

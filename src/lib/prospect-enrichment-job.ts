@@ -19,7 +19,14 @@ export interface EnqueueResponse {
   job_id: string;
   total: number;
   concurrency: number;
-  status: 'pending';
+  /**
+   * 'paused' = les credits du provider d'enrichissement etaient deja epuises
+   * au moment du clic. Le job et ses items sont bien crees (la selection n'est
+   * pas perdue) mais aucun worker n'est lance : credits-watchdog le demarrera
+   * des le retour des credits.
+   */
+  status: 'pending' | 'paused';
+  pause_reason?: string;
 }
 
 const STORAGE_KEY = 'prospect-enrichment-job-id';

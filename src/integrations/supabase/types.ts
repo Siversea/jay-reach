@@ -708,6 +708,9 @@ export type Database = {
           created_at: string
           failed: number
           id: string
+          pause_reason: string | null
+          paused_at: string | null
+          resumed_at: string | null
           status: string
           total: number
           updated_at: string
@@ -721,6 +724,9 @@ export type Database = {
           created_at?: string
           failed?: number
           id?: string
+          pause_reason?: string | null
+          paused_at?: string | null
+          resumed_at?: string | null
           status?: string
           total?: number
           updated_at?: string
@@ -734,6 +740,9 @@ export type Database = {
           created_at?: string
           failed?: number
           id?: string
+          pause_reason?: string | null
+          paused_at?: string | null
+          resumed_at?: string | null
           status?: string
           total?: number
           updated_at?: string
@@ -1273,6 +1282,59 @@ export type Database = {
           },
         ]
       }
+      provider_credit_state: {
+        Row: {
+          category: string
+          created_at: string
+          exhausted_at: string | null
+          id: string
+          last_balance: number | null
+          last_checked_at: string
+          last_error: string | null
+          provider_type: string
+          restored_at: string | null
+          state: string
+          updated_at: string
+          workspace_id: string
+        }
+        Insert: {
+          category: string
+          created_at?: string
+          exhausted_at?: string | null
+          id?: string
+          last_balance?: number | null
+          last_checked_at?: string
+          last_error?: string | null
+          provider_type: string
+          restored_at?: string | null
+          state?: string
+          updated_at?: string
+          workspace_id: string
+        }
+        Update: {
+          category?: string
+          created_at?: string
+          exhausted_at?: string | null
+          id?: string
+          last_balance?: number | null
+          last_checked_at?: string
+          last_error?: string | null
+          provider_type?: string
+          restored_at?: string | null
+          state?: string
+          updated_at?: string
+          workspace_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "provider_credit_state_workspace_id_fkey"
+            columns: ["workspace_id"]
+            isOneToOne: false
+            referencedRelation: "workspaces"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       recruitment_agencies_blacklist: {
         Row: {
           detected_count: number
@@ -1729,6 +1791,7 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      call_credits_watchdog: { Args: { p_functions_url: string }; Returns: number }
       call_poll_prospect_batches: { Args: never; Returns: undefined }
       call_prospect_weekly_recap: { Args: never; Returns: undefined }
       claim_next_enrichment_item: {
@@ -1800,9 +1863,63 @@ export type Database = {
       }
       normalize_agency_name: { Args: { input: string }; Returns: string }
       normalize_company_name_sql: { Args: { p_name: string }; Returns: string }
+      pause_enrichment_job: {
+        Args: { p_job_id: string; p_reason: string; p_requeue_item_id?: string }
+        Returns: {
+          out_paused: boolean
+          out_pending: number
+          out_requeued: number
+        }[]
+      }
+      pause_enrichment_jobs_for_workspace: {
+        Args: { p_reason: string; p_workspace_id: string }
+        Returns: {
+          out_jobs: number
+        }[]
+      }
+      resume_enrichment_job: {
+        Args: {
+          p_functions_url: string
+          p_job_id: string
+          p_service_role_key: string
+          p_stale_minutes?: number
+        }
+        Returns: {
+          out_reclaimed: number
+          out_resumed: boolean
+          out_spawned: number
+        }[]
+      }
+      resume_paused_enrichment_jobs: {
+        Args: {
+          p_functions_url: string
+          p_reason_like?: string
+          p_service_role_key: string
+          p_workspace_id?: string
+        }
+        Returns: {
+          out_job_id: string
+          out_reclaimed: number
+          out_spawned: number
+        }[]
+      }
       search_prospect_companies: {
         Args: { p_limit?: number; p_query: string }
         Returns: Json
+      }
+      set_provider_credit_state: {
+        Args: {
+          p_balance?: number
+          p_category: string
+          p_error?: string
+          p_provider_type: string
+          p_state: string
+          p_workspace_id: string
+        }
+        Returns: {
+          out_changed: boolean
+          out_previous_state: string
+        }[]
       }
       show_limit: { Args: never; Returns: number }
       show_trgm: { Args: { "": string }; Returns: string[] }

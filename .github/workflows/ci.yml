@@ -79,6 +79,7 @@ jobs:
             --allow-all \
             --no-check \
             supabase/functions/_shared/bouncer.test.ts \
+            supabase/functions/_shared/credit-state.test.ts \
             supabase/functions/_shared/crm-detection/domain-resolver.test.ts \
             supabase/functions/_shared/crm-detection/jobs-analyzer.test.ts \
             supabase/functions/_shared/crm-detection/web-search-crm.test.ts \

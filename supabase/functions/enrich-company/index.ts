@@ -21,6 +21,7 @@ import {
   type FullEnrichSearchPerson,
   type SearchFilter,
 } from "../_shared/fullenrich.ts";
+import { markCreditsExhausted, pauseEnrichmentJob, PAUSE_REASON } from "../_shared/credit-state.ts";
 import { findCompanyByName, type SireneCompany } from "../_shared/insee-sirene.ts";
 import { buildGeoCascade, stripGeoSuffix } from "../_shared/geo-cascade.ts";
 import { normalizeLinkedinUrl } from "../_shared/linkedin-validator.ts";
@@ -205,27 +206,39 @@ Deno.serve(async (req: Request) => {
         };
       }
 
-      // Credits FullEnrich epuises : stop net. On kill tous les items
-      // pending/processing + le job, et on ne spawn PAS de nouveau worker.
-      // L'item courant est marque failed par kill_enrichment_job, pas besoin
-      // d'appeler complete_enrichment_item (qui updatererait le compteur).
+      // Credits FullEnrich epuises : PAUSE, pas kill. Les items restants
+      // gardent leur statut 'pending' et l'item courant est requeue (sa
+      // tentative avortee ne compte pas) — rien n'est perdu. Aucun worker
+      // n'est re-spawn : claim_next_enrichment_item et spawn_enrichment_worker
+      // refusent tous les deux un job 'paused'. Le job repart tout seul quand
+      // credits-watchdog constate le retour des credits.
       if (creditsExhausted) {
-        console.error(`[enrich-company] FullEnrich credits exhausted — killing job ${body.job_id}`);
-        const kill = await supabase.rpc("kill_enrichment_job", {
-          p_job_id: body.job_id,
-          p_reason: "fullenrich_credits_exhausted",
-        });
-        if (kill.error) {
-          console.error(`[enrich-company] kill_enrichment_job failed:`, kill.error.message);
-        } else {
-          const killedCount = (kill.data?.[0]?.killed_items as number | undefined) ?? 0;
-          console.log(`[enrich-company] Killed ${killedCount} items for job ${body.job_id}`);
+        console.error(`[enrich-company] FullEnrich credits exhausted — pausing job ${body.job_id}`);
+        const { data: jobRow } = await supabase
+          .from("prospect_enrichment_jobs")
+          .select("workspace_id")
+          .eq("id", body.job_id)
+          .maybeSingle();
+        if (jobRow?.workspace_id) {
+          await markCreditsExhausted(supabase, jobRow.workspace_id as string, "enricher", "fullenrich", {
+            error: errorMessage,
+          });
         }
+        const pause = await pauseEnrichmentJob(
+          supabase,
+          body.job_id,
+          PAUSE_REASON.fullenrichCredits,
+          itemId,
+        );
+        console.log(
+          `[enrich-company] Job ${body.job_id} en pause : ${pause.pending} item(s) conserves pour la reprise`
+        );
         return json({
           ...result,
           job_id: body.job_id,
           item_id: itemId,
-          killed: "fullenrich_credits_exhausted",
+          paused: PAUSE_REASON.fullenrichCredits,
+          pending: pause.pending,
         }, 200, corsHeaders);
       }
 

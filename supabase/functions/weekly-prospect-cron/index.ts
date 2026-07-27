@@ -118,7 +118,13 @@ Deno.serve(async (req: Request) => {
     results.push({
       step: "scrape-job-signals",
       success: res.ok,
-      details: { total_inserted: data.total_inserted, scrapers: Array.from(new Set((data.results || []).flatMap((r: { scrapers?: Record<string, unknown> }) => Object.keys(r?.scrapers || {})))) },
+      details: {
+        total_inserted: data.total_inserted,
+        // Sources sautees faute de credits : l'UI l'affiche pour que
+        // l'operateur ne prenne pas un run maigre pour une panne.
+        total_paused: data.total_paused,
+        scrapers: Array.from(new Set((data.results || []).flatMap((r: { scrapers?: Record<string, unknown> }) => Object.keys(r?.scrapers || {})))),
+      },
       error: res.ok ? undefined : JSON.stringify(data),
     });
   } catch (err) {

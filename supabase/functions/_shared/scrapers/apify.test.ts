@@ -1,5 +1,5 @@
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { apifyScraper } from './apify.ts';
+import { apifyScraper, isApifyCreditsError } from './apify.ts';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 // Remplace globalThis.fetch par un stub qui renvoie `payload` en JSON. Rend
@@ -162,6 +162,52 @@ Deno.test('borne le run au budget et loggue les mots-cles non traites', async ()
     assertEquals(budgetErr?.includes('k3'), true);
   } finally {
     Deno.env.delete('APIFY_JOBS_BUDGET_MS');
+    restore();
+  }
+});
+
+// ─── Pause sur credits epuises ──────────────────────────────────────────────
+
+Deno.test('isApifyCreditsError : 402 = plus de credits', () => {
+  assertEquals(isApifyCreditsError(402, 'Payment Required'), true);
+});
+
+Deno.test('isApifyCreditsError : 403 quota mensuel atteint', () => {
+  assertEquals(
+    isApifyCreditsError(403, '{"error":{"type":"monthly-usage-hard-limit-exceeded"}}'),
+    true,
+  );
+  assertEquals(isApifyCreditsError(403, '{"error":{"type":"insufficient-credit"}}'), true);
+});
+
+Deno.test('isApifyCreditsError : les autres erreurs ne mettent pas en pause', () => {
+  // Un 403 de permission ou un 429 de rate limit sont transitoires : mettre la
+  // source en pause dessus couperait le scraping pour rien.
+  assertEquals(isApifyCreditsError(403, '{"error":{"type":"actor-is-not-rented"}}'), false);
+  assertEquals(isApifyCreditsError(429, 'rate limited'), false);
+  assertEquals(isApifyCreditsError(500, 'internal error'), false);
+  assertEquals(isApifyCreditsError(400, 'bad input'), false);
+});
+
+Deno.test('402 remonte credits_exhausted et stoppe les mots-cles suivants', async () => {
+  const { calls, restore } = stubFetch(null, { status: 402, body: 'insufficient credit' });
+  try {
+    const res = await apifyScraper.fetch(['k1', 'k2', 'k3'], CREDS);
+    // Un seul appel : inutile d'insister, les suivants echoueraient pareil.
+    assertEquals(calls.length, 1);
+    assertEquals(res.credits_exhausted, true);
+    assertEquals(res.signals.length, 0);
+  } finally {
+    restore();
+  }
+});
+
+Deno.test('une erreur HTTP ordinaire ne leve pas credits_exhausted', async () => {
+  const { restore } = stubFetch(null, { status: 429, body: 'rate limited' });
+  try {
+    const res = await apifyScraper.fetch(['k'], CREDS);
+    assertEquals(res.credits_exhausted, undefined);
+  } finally {
     restore();
   }
 });

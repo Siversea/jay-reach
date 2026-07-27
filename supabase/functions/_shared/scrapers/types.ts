@@ -19,6 +19,13 @@ export interface ScraperResult {
   signals: ScrapedSignal[];
   errors: string[];
   duration_ms: number;
+  /**
+   * Le provider a refuse de travailler faute de credits / quota (402, quota
+   * mensuel atteint...). L'appelant marque alors la source 'exhausted' dans
+   * provider_credit_state : les prochains runs sont sautes jusqu'au retour des
+   * credits, plutot que de re-echouer a chaque cron.
+   */
+  credits_exhausted?: boolean;
 }
 
 export interface Scraper {

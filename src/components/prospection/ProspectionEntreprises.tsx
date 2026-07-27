@@ -126,6 +126,19 @@ export function ProspectionEntreprises() {
   const [scrapeState, setScrapeState] = useState<ScrapeState>({ status: 'running' });
 
   const prevRunningRef = useRef(enrichmentJob.running);
+  const prevPausedRef = useRef(enrichmentJob.paused);
+
+  // Passage en pause (credits provider epuises) : on previent, et on rouvre la
+  // modale qui explique que rien n'est perdu et propose de re-verifier le solde.
+  useEffect(() => {
+    if (!prevPausedRef.current && enrichmentJob.paused) {
+      toast({
+        description: 'Credits epuises — enrichissement mis en pause. Il reprendra automatiquement.',
+      });
+      setModalOpen(true);
+    }
+    prevPausedRef.current = enrichmentJob.paused;
+  }, [enrichmentJob.paused, toast]);
 
   // Ouvre automatiquement la modale quand un job demarre. L'utilisateur peut
   // la reduire — la queue continue en backend dans tous les cas.
@@ -167,12 +180,26 @@ export function ProspectionEntreprises() {
       enrichmentJob.trackJob(res.job_id);
       return res;
     },
+    onSuccess: (res) => {
+      // Credits deja a sec au moment du clic : le job existe mais attend. La
+      // selection n'est pas perdue, on le dit explicitement.
+      if (res.status === 'paused') {
+        toast({
+          description: `Credits epuises — les ${res.total} entreprises sont en file et seront enrichies des le rechargement.`,
+        });
+        setModalOpen(true);
+      }
+    },
     onError: (err: unknown) => {
       logger.error('[ProspectionEntreprises] enqueueEnrichment failed', err);
       const msg = err instanceof Error ? err.message : 'Impossible de lancer l\'enrichissement';
-      // Erreur HTTP 409 = un job tourne deja → message specifique + ouvre la modale
+      // Erreur HTTP 409 = un job tourne deja (ou attend des credits) → message
+      // specifique + ouvre la modale de suivi
       if (msg.includes('deja en cours')) {
         toast({ description: 'Un enrichissement tourne deja. Ouvre la fenetre de suivi.' });
+        setModalOpen(true);
+      } else if (msg.includes('en pause')) {
+        toast({ description: 'Un enrichissement attend le retour des credits. Ouvre la fenetre de suivi.' });
         setModalOpen(true);
       } else {
         toast({ variant: 'destructive', description: msg });
@@ -193,6 +220,7 @@ export function ProspectionEntreprises() {
           status: 'done',
           totalInserted: Number(details.total_inserted ?? 0),
           sources: (details.scrapers as string[]) ?? [],
+          pausedSources: Number(details.total_paused ?? 0),
         });
       } else {
         setScrapeState({ status: 'failed', error: failed.map(f => f.step).join(', ') || 'Scraping en échec' });

@@ -1,9 +1,12 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { CheckCircle2, XCircle, Loader2, Clock, Sparkles, Minimize2 } from 'lucide-react';
+import { CheckCircle2, XCircle, Loader2, Clock, Sparkles, Minimize2, PauseCircle, RefreshCw } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { ProgressBar, StatTile } from '@/components/prospection/_shared/progress-ui';
+import { useToast } from '@/hooks/use-toast';
+import { checkCreditsAndResume, countResumedJobs } from '@/lib/credits-watchdog';
+import { logger } from '@/lib/logger';
 import type { EnrichmentJobState } from '@/hooks/useEnrichmentJob';
 import type { EnrichmentJobItem } from '@/hooks/useEnrichmentJobItems';
 
@@ -13,6 +16,8 @@ import type { EnrichmentJobItem } from '@/hooks/useEnrichmentJobItems';
  * - progress overall + stats (termines / echecs / en cours)
  * - liste scrollable des entreprises avec statut par ligne, trie :
  *   processing en haut, puis pending, puis completed (recents d'abord), puis failed
+ * - bandeau dedie quand le job est en pause faute de credits provider, avec
+ *   verification manuelle du solde (le backend re-verifie deja tout seul)
  * - fermable (la queue backend continue en arriere-plan, c'est explicite en footer)
  */
 export function EnrichmentJobModal({
@@ -34,6 +39,7 @@ export function EnrichmentJobModal({
   const processing = items.filter(i => i.status === 'processing').length;
   const pending = items.filter(i => i.status === 'pending').length;
   const isFinal = job.status === 'completed' || job.status === 'failed';
+  const isPaused = job.status === 'paused';
 
   return (
     <Dialog open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
@@ -41,13 +47,17 @@ export function EnrichmentJobModal({
         {/* Header */}
         <DialogHeader className="p-6 pb-4 border-b border-border">
           <DialogTitle className="flex items-center gap-2 text-foreground">
-            <Sparkles className="h-5 w-5 text-violet-500" />
+            {isPaused
+              ? <PauseCircle className="h-5 w-5 text-amber-500" />
+              : <Sparkles className="h-5 w-5 text-violet-500" />}
             {isFinal
               ? (job.failed > 0 ? 'Enrichissement termine (avec erreurs)' : 'Enrichissement termine')
-              : 'Enrichissement en cours'}
+              : isPaused ? 'Enrichissement en pause' : 'Enrichissement en cours'}
           </DialogTitle>
           <ProgressBar value={done} total={job.total} className="mt-3" />
         </DialogHeader>
+
+        {isPaused && <PausedBanner job={job} remaining={pending + processing} />}
 
         {/* Stats */}
         <div className="px-6 py-3 border-b border-border bg-muted/30">
@@ -79,7 +89,9 @@ export function EnrichmentJobModal({
           <p className="text-xs text-muted-foreground">
             {isFinal
               ? `Temps total : ${formatDuration(job.created_at, job.completed_at)}`
-              : 'Continue meme si tu fermes cette fenetre.'}
+              : isPaused
+                ? 'Reprend automatiquement des que les credits sont recharges.'
+                : 'Continue meme si tu fermes cette fenetre.'}
           </p>
           <Button variant="ghost" size="sm" onClick={onClose} className="gap-1.5 h-7">
             <Minimize2 className="h-3.5 w-3.5" />
@@ -92,6 +104,76 @@ export function EnrichmentJobModal({
 }
 
 // ---------------------------------------------------------------------------
+
+/**
+ * Bandeau affiche quand le job attend le retour des credits provider.
+ *
+ * Le message insiste sur le fait que rien n'est perdu : c'etait la principale
+ * source d'inquietude avec l'ancien comportement (kill du job = items marques
+ * 'failed', selection a refaire a la main).
+ */
+function PausedBanner({ job, remaining }: { job: EnrichmentJobState; remaining: number }) {
+  const { toast } = useToast();
+  const [checking, setChecking] = useState(false);
+
+  const provider = providerLabel(job.pause_reason);
+
+  const onCheck = async () => {
+    setChecking(true);
+    try {
+      const res = await checkCreditsAndResume();
+      const resumedJobs = countResumedJobs(res);
+      if (resumedJobs > 0) {
+        toast({ description: 'Credits de retour — l\'enrichissement redemarre.' });
+      } else {
+        const balances = res.checked
+          .filter(c => c.balance !== null)
+          .map(c => `${c.provider} : ${c.balance} ${c.unit}`)
+          .join(' · ');
+        toast({
+          description: balances
+            ? `Toujours pas assez de credits (${balances}).`
+            : 'Toujours pas de credits disponibles.',
+        });
+      }
+    } catch (err) {
+      logger.error('[EnrichmentJobModal] checkCreditsAndResume failed', err);
+      toast({ variant: 'destructive', description: 'Verification du solde impossible.' });
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  return (
+    <div className="px-6 py-4 border-b border-border bg-amber-500/10">
+      <div className="flex items-start gap-3">
+        <PauseCircle className="h-4 w-4 shrink-0 mt-0.5 text-amber-500" />
+        <div className="flex-1 min-w-0 space-y-1">
+          <p className="text-sm font-medium text-foreground">
+            Credits {provider} epuises — enrichissement en pause
+          </p>
+          <p className="text-xs text-muted-foreground">
+            {remaining} entreprise{remaining > 1 ? 's' : ''} conservee{remaining > 1 ? 's' : ''} en file.
+            Le job reprendra exactement ou il s'est arrete des que le compte sera recharge —
+            aucune selection a refaire, aucun credit gaspille.
+          </p>
+        </div>
+        <Button variant="outline" size="sm" onClick={onCheck} disabled={checking} className="gap-1.5 h-7 shrink-0">
+          <RefreshCw className={cn('h-3.5 w-3.5', checking && 'animate-spin')} />
+          Verifier le solde
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/** "fullenrich_credits_exhausted" -> "FullEnrich". */
+function providerLabel(pauseReason: string | null): string {
+  if (!pauseReason) return 'provider';
+  if (pauseReason.startsWith('fullenrich')) return 'FullEnrich';
+  if (pauseReason.startsWith('apify')) return 'Apify';
+  return 'provider';
+}
 
 function ItemRow({ item }: { item: EnrichmentJobItem }) {
   const name = item.company_name || 'Entreprise inconnue';

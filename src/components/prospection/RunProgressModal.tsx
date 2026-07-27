@@ -11,6 +11,12 @@ export interface ScrapeState {
   totalInserted?: number;
   sources?: string[];
   error?: string;
+  /**
+   * Nombre de sources sautees faute de credits (Apify a sec). Le scrape n'est
+   * pas en echec pour autant : les autres sources ont tourne, et les sources
+   * en pause repartiront d'elles-memes au prochain run une fois rechargees.
+   */
+  pausedSources?: number;
 }
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -85,6 +91,12 @@ export function RunProgressModal({
                     ? `${scrape.totalInserted ?? 0} offres récupérées${sourcesLabel ? ` (${sourcesLabel})` : ''}`
                     : 'Récupération en cours…'}
               </div>
+              {scrapeDone && (scrape.pausedSources ?? 0) > 0 && (
+                <div className="text-xs text-amber-500 mt-0.5">
+                  {scrape.pausedSources} source{(scrape.pausedSources ?? 0) > 1 ? 's' : ''} en pause
+                  (crédits épuisés) — reprise automatique au rechargement.
+                </div>
+              )}
             </div>
           </div>
 

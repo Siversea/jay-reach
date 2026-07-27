@@ -7,6 +7,7 @@ import { apifyScraper } from '../_shared/scrapers/apify.ts';
 import { processSignals } from '../_shared/scrapers/signal-processor.ts';
 import type { Scraper, IcpCriteria } from '../_shared/scrapers/types.ts';
 import { resolveCredential } from '../_shared/providers/registry.ts';
+import { isCreditsExhausted, markCreditsExhausted } from '../_shared/credit-state.ts';
 
 const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
 const supabaseServiceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -85,7 +86,7 @@ serve(async (req: Request) => {
       workspace_id: string;
       scrapers: Record<string, ScrapeOneResult>;
     }> = [];
-    let totalSignals = 0, totalInserted = 0, totalDuplicates = 0, totalDismissed = 0;
+    let totalSignals = 0, totalInserted = 0, totalDuplicates = 0, totalDismissed = 0, totalPaused = 0;
 
     // 2. Pour chaque trigger, lance les scrapers configures avec ses keywords
     for (const trigger of triggers as SignalTrigger[]) {
@@ -114,6 +115,7 @@ serve(async (req: Request) => {
         totalInserted += r.inserted;
         totalDuplicates += r.duplicates;
         totalDismissed += r.dismissed;
+        if (r.paused) totalPaused += 1;
       }
 
       results.push({
@@ -132,6 +134,9 @@ serve(async (req: Request) => {
       total_inserted: totalInserted,
       total_duplicates: totalDuplicates,
       total_dismissed: totalDismissed,
+      // Nombre de (trigger x source) sautes faute de credits. > 0 = le
+      // scraping est en pause en attendant le rechargement du provider.
+      total_paused: totalPaused,
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
@@ -159,9 +164,26 @@ async function scrapeOneSource(
   dismissed: number;
   duration_ms: number;
   errors: string[];
+  paused?: boolean;
 }> {
   try {
     console.log(`[scrape] Trigger ${trigger.id} > ${scraper.name} : start`);
+
+    // Source en pause faute de credits : on saute le run au lieu de bruler un
+    // appel qui echouera. credits-watchdog remettra la source en 'ok' des que
+    // le quota repart, et le prochain cron scrapera normalement.
+    if (await isCreditsExhausted(supabase, trigger.workspace_id, 'source', scraper.name)) {
+      console.warn(`[scrape] Trigger ${trigger.id} > ${scraper.name} : credits epuises, run saute`);
+      await supabase.from('prospect_scraping_logs').insert({
+        workspace_id: trigger.workspace_id,
+        source: scraper.name,
+        status: 'paused',
+        duration_ms: 0,
+        results_count: 0,
+        metadata: { trigger_id: trigger.id, reason: 'credits_exhausted' },
+      });
+      return { success: false, signals_found: 0, inserted: 0, duplicates: 0, dismissed: 0, duration_ms: 0, errors: ['source_credits_exhausted'], paused: true };
+    }
 
     // Résout les credentials du scraper
     const creds = await resolveCredential(supabase, trigger.workspace_id, 'source', scraper.name);
@@ -172,6 +194,16 @@ async function scrapeOneSource(
 
     const result = await scraper.fetch(trigger.search_keywords, { credentials: creds });
     console.log(`[scrape] Trigger ${trigger.id} > ${scraper.name} : ${result.signals.length} signals, ${result.duration_ms}ms`);
+
+    // Le provider a dit "plus de credits" : on le marque a sec pour que les
+    // prochains triggers du meme run (et les prochains crons) sautent la
+    // source sans re-tenter. Les signaux deja ramenes avant l'erreur sont
+    // quand meme traites juste en dessous — rien n'est jete.
+    if (result.credits_exhausted) {
+      await markCreditsExhausted(supabase, trigger.workspace_id, 'source', scraper.name, {
+        error: result.errors[result.errors.length - 1] ?? 'credits exhausted',
+      });
+    }
 
     let processResult = { inserted: 0, duplicates: 0, dismissed: 0 };
     if (result.signals.length > 0) {
@@ -187,13 +219,16 @@ async function scrapeOneSource(
     await supabase.from('prospect_scraping_logs').insert({
       workspace_id: trigger.workspace_id,
       source: scraper.name,
-      status: result.signals.length > 0 ? 'success' : (result.errors.length > 0 ? 'error' : 'success'),
+      status: result.credits_exhausted
+        ? 'paused'
+        : (result.signals.length > 0 ? 'success' : (result.errors.length > 0 ? 'error' : 'success')),
       duration_ms: result.duration_ms,
       results_count: result.signals.length,
       metadata: {
         trigger_id: trigger.id,
         errors: result.errors,
         inserted: processResult.inserted,
+        ...(result.credits_exhausted ? { reason: 'credits_exhausted' } : {}),
       },
     });
 
@@ -205,6 +240,7 @@ async function scrapeOneSource(
       dismissed: processResult.dismissed,
       duration_ms: result.duration_ms,
       errors: result.errors,
+      paused: result.credits_exhausted === true,
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

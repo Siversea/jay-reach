@@ -85,6 +85,21 @@ function mapApifyJobToSignal(job: ApifyJobPosting): ScrapedSignal | null {
   };
 }
 
+/**
+ * Distingue un "plus de crédits" d'une erreur transitoire.
+ *
+ * Apify renvoie 402 Payment Required quand le compte n'a plus de crédit
+ * prépayé, et 403 avec un type `*-limit-exceeded` / `insufficient-credit`
+ * quand la limite d'usage mensuelle du plan est atteinte. Les autres 4xx/5xx
+ * (mauvais input, actor down, rate limit) ne sont PAS un problème de solde et
+ * ne doivent pas mettre la source en pause.
+ */
+export function isApifyCreditsError(status: number, body: string): boolean {
+  if (status === 402) return true;
+  if (status !== 403) return false;
+  return /usage[-\s]?limit|limit[-\s]?exceeded|insufficient[-\s]?credit|payment/i.test(body);
+}
+
 export const apifyScraper: Scraper = {
   name: 'apify_linkedin',
 
@@ -135,6 +150,13 @@ export const apifyScraper: Scraper = {
         if (!response.ok) {
           const text = await response.text();
           errors.push(`apify_linkedin "${keyword}": HTTP ${response.status} - ${text.substring(0, 100)}`);
+          // Plus de credits / quota mensuel atteint : inutile d'insister sur
+          // les mots-clés suivants, ils échoueront tous pareil. On remonte le
+          // flag pour que l'appelant mette la source en pause.
+          if (isApifyCreditsError(response.status, text)) {
+            console.warn(`[apify_linkedin] credits/quota épuisés (HTTP ${response.status}) — arrêt du run`);
+            return { signals, errors, duration_ms: Date.now() - start, credits_exhausted: true };
+          }
           continue;
         }
 

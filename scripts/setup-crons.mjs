@@ -55,6 +55,12 @@ const jobs = [
     "Monitoring crédits FullEnrich (06h UTC)",
   ],
   [
+    "jr-credits-watchdog",
+    "*/10 * * * *",
+    "credits-watchdog",
+    "Pause/reprise du pipeline selon le solde des providers (toutes les 10 min)",
+  ],
+  [
     "jr-weekly-recap",
     "0 8 * * 1",
     "prospect-weekly-recap",

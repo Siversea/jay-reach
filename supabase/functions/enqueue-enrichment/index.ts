@@ -4,6 +4,7 @@ import { getCorsHeaders } from "../_shared/cors.ts";
 import { extractUserId } from "../_shared/subscription-access.ts";
 import { resolveUserWorkspace } from "../_shared/workspace.ts";
 import { validateOrRespond, z } from "../_shared/validation.ts";
+import { isCreditsExhausted, PAUSE_REASON } from "../_shared/credit-state.ts";
 
 /**
  * enqueue-enrichment
@@ -80,20 +81,20 @@ Deno.serve(async (req: Request) => {
     // Idempotence : refuse si un job actif existe deja pour cet user.
     // Evite le double-fire (deux onglets, double-clic) qui creait 2 jobs
     // avec les memes signaux → enrichissement duplique + credits FullEnrich
-    // crames.
+    // crames. 'paused' compte comme actif : le job n'est pas fini, il attend
+    // le retour des credits et reprendra tout seul.
     const { data: existingJob } = await supabase
       .from("prospect_enrichment_jobs")
-      .select("id")
+      .select("id, status")
       .eq("user_id", userId)
-      .in("status", ["pending", "running"])
+      .in("status", ["pending", "running", "paused"])
       .limit(1)
       .maybeSingle();
     if (existingJob) {
-      return json(
-        { error: "Un enrichissement est deja en cours, attends qu'il termine", job_id: existingJob.id },
-        409,
-        corsHeaders,
-      );
+      const message = existingJob.status === "paused"
+        ? "Un enrichissement est en pause (credits epuises), il reprendra automatiquement"
+        : "Un enrichissement est deja en cours, attends qu'il termine";
+      return json({ error: message, job_id: existingJob.id, status: existingJob.status }, 409, corsHeaders);
     }
 
     const workspaceId = await resolveUserWorkspace(supabase, userId);
@@ -101,13 +102,21 @@ Deno.serve(async (req: Request) => {
       return json({ error: "No workspace membership for user" }, 403, corsHeaders);
     }
 
+    // Credits FullEnrich deja a sec ? On cree quand meme le job, mais
+    // directement en pause : les items sont enregistres, aucun worker n'est
+    // lance, et credits-watchdog le demarrera des le retour des credits.
+    // Sans ca, l'operateur perdrait sa selection d'entreprises.
+    const creditsOut = await isCreditsExhausted(supabase, workspaceId, "enricher", "fullenrich");
+
     // Cree le job
     const { data: job, error: jobError } = await supabase
       .from("prospect_enrichment_jobs")
       .insert({
         user_id: userId,
         workspace_id: workspaceId,
-        status: "pending",
+        status: creditsOut ? "paused" : "pending",
+        paused_at: creditsOut ? new Date().toISOString() : null,
+        pause_reason: creditsOut ? PAUSE_REASON.fullenrichCredits : null,
         concurrency,
         total: signalIds.length,
       })
@@ -131,6 +140,19 @@ Deno.serve(async (req: Request) => {
       // Rollback le job si les items n'ont pas ete crees
       await supabase.from("prospect_enrichment_jobs").delete().eq("id", job.id);
       throw new Error(`Failed to create items: ${itemsError.message}`);
+    }
+
+    if (creditsOut) {
+      console.warn(
+        `[enqueue-enrichment] Job ${job.id} cree EN PAUSE (${signalIds.length} items) : credits FullEnrich epuises`
+      );
+      return json({
+        job_id: job.id,
+        total: signalIds.length,
+        concurrency,
+        status: "paused",
+        pause_reason: PAUSE_REASON.fullenrichCredits,
+      }, 200, corsHeaders);
     }
 
     console.log(
