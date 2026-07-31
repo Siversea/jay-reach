@@ -40,9 +40,11 @@ export function BulkSendValidEmailsPanel({
     try {
       const result = await push();
       if (!result) return;
-      const { ok, skipped, failed } = result;
+      const { ok, skipped, failed, errors } = result;
+      const firstError = errors[0];
       toast({
-        description: `${ok} envoyé${ok > 1 ? 's' : ''} sur Smartlead.${skipped > 0 ? ` ${skipped} bloqué${skipped > 1 ? 's' : ''} par le gate.` : ''}${failed > 0 ? ` ${failed} erreur${failed > 1 ? 's' : ''}.` : ''}`,
+        variant: ok === 0 && failed > 0 ? 'destructive' : undefined,
+        description: `${ok} envoyé${ok > 1 ? 's' : ''} sur Smartlead.${skipped > 0 ? ` ${skipped} bloqué${skipped > 1 ? 's' : ''} par le gate.` : ''}${failed > 0 ? ` ${failed} erreur${failed > 1 ? 's' : ''}.` : ''}${firstError ? ` ${firstError}` : ''}`,
       });
     } catch (err) {
       toast({

@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { supabase } from '@/lib/supabase';
 import { useToast } from '@/hooks/use-toast';
 import type { EnrichedCompany } from '@/hooks/useEnrichedCompanies';
+import { pushProspectsToSmartlead } from './pushProspects';
 
 /**
  * Push Smartlead global (Jay Reach 1.5.5).
@@ -29,31 +29,13 @@ export function useGlobalSmartleadPush(companies: EnrichedCompany[]) {
           && p.email
           && p.smartlead_push_decision !== 'push',
       );
-      if (validProspects.length === 0) return { ok: 0, skipped: 0, failed: 0, total: 0 };
-      const { data: session } = await supabase.auth.getSession();
-      const accessToken = session?.session?.access_token;
-      if (!accessToken) throw new Error('Auth manquante : reconnecte-toi');
-      let ok = 0, skipped = 0, failed = 0;
-      for (const p of validProspects) {
-        try {
-          const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/send-via-smartlead`, {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ prospect_id: p.id, channel: 'email', manual_override: true }),
-          });
-          if (res.ok) ok++;
-          else if (res.status === 422) skipped++;
-          else failed++;
-        } catch {
-          failed++;
-        }
-      }
-      return { ok, skipped, failed, total: validProspects.length };
+      return await pushProspectsToSmartlead(validProspects.map((p) => p.id));
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['enriched-companies'] });
+      const firstError = data.errors[0];
       toast({
-        description: `${data.ok}/${data.total} pousse${data.ok > 1 ? 's' : ''} sur Smartlead${data.skipped > 0 ? ` · ${data.skipped} bloque${data.skipped > 1 ? 's' : ''} par le gate` : ''}${data.failed > 0 ? ` · ${data.failed} erreur${data.failed > 1 ? 's' : ''}` : ''}.`,
+        description: `${data.ok}/${data.total} pousse${data.ok > 1 ? 's' : ''} sur Smartlead${data.skipped > 0 ? ` · ${data.skipped} bloque${data.skipped > 1 ? 's' : ''} par le gate` : ''}${data.failed > 0 ? ` · ${data.failed} erreur${data.failed > 1 ? 's' : ''}` : ''}.${firstError ? ` ${firstError}` : ''}`,
       });
     },
     onError: (err) => {

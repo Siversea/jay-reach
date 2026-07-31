@@ -38,7 +38,56 @@ export interface OutreachProviderConfig {
   apiKey: string;
 }
 
+/**
+ * Resultat par lead d'un push groupe. Les providers qui poussent par lot
+ * (Smartlead : 1 requete pour N leads) ne savent pas dire quel lead a ete
+ * ajoute vs ignore : `result` porte alors les compteurs du lot, pas du lead.
+ */
+export interface OutreachBatchItemResult {
+  prospect_id: string;
+  ok: boolean;
+  /** Message d'erreur si ok=false (campagne non reliee, appel provider en echec, ...). */
+  error?: string;
+  result?: OutreachPushResult;
+}
+
 export interface OutreachProvider {
   readonly type: string;
   push(lead: OutreachLead, ctx: OutreachProviderConfig, supabase: SupabaseClient): Promise<OutreachPushResult>;
+  /**
+   * Push groupe. Optionnel : `pushManyOrSequential` retombe sur des push()
+   * successifs pour les providers qui ne l'implementent pas.
+   */
+  pushMany?(
+    leads: OutreachLead[],
+    ctx: OutreachProviderConfig,
+    supabase: SupabaseClient,
+  ): Promise<OutreachBatchItemResult[]>;
+}
+
+/**
+ * Pousse un lot en une fois si le provider le supporte, sinon sequentiellement.
+ * Une erreur sur un lead n'interrompt jamais le reste du lot.
+ */
+export async function pushManyOrSequential(
+  provider: OutreachProvider,
+  leads: OutreachLead[],
+  ctx: OutreachProviderConfig,
+  supabase: SupabaseClient,
+): Promise<OutreachBatchItemResult[]> {
+  if (provider.pushMany) return await provider.pushMany(leads, ctx, supabase);
+
+  const results: OutreachBatchItemResult[] = [];
+  for (const lead of leads) {
+    try {
+      results.push({ prospect_id: lead.prospect_id, ok: true, result: await provider.push(lead, ctx, supabase) });
+    } catch (err) {
+      results.push({
+        prospect_id: lead.prospect_id,
+        ok: false,
+        error: err instanceof Error ? err.message : "push failed",
+      });
+    }
+  }
+  return results;
 }
